@@ -46,23 +46,40 @@ def compute_delta_angle(data):
         deltas.append(angle)
     return times, deltas
 
-# 📊 Affichage graphique avec couleurs
+# 📊 Affichage graphique avec couleurs et légende
 def plot_delta_angle(times, deltas):
     fig, ax = plt.subplots(figsize=(10, 5))
+    good, warning, bad = 0, 0, 0
+
     for t, d in zip(times, deltas):
         if abs(d) <= GOOD_POSTURE_THRESHOLD:
             color = 'green'
+            good += 1
         elif abs(d) <= WARNING_THRESHOLD:
             color = 'orange'
+            warning += 1
         else:
             color = 'red'
+            bad += 1
         ax.plot(t, d, marker='o', color=color)
+
+    total = len(deltas)
+    bad_pct = (bad / total) * 100 if total else 0
+
+    # Légende
+    ax.plot([], [], 'go', label='✅ Bonne posture (≤15°)')
+    ax.plot([], [], 'orange', label='⚠️ À corriger (15–20°)')
+    ax.plot([], [], 'ro', label='❌ Mauvaise posture (>20°)')
 
     ax.set_title("Écart d'angle entre capteurs")
     ax.set_xlabel("Temps (ms)")
     ax.set_ylabel("Angle (°)")
     ax.grid(True)
+    ax.legend()
     st.pyplot(fig)
+
+    # Pourcentage
+    st.markdown(f"### 📊 Pourcentage de mauvaise posture : **{bad_pct:.1f}%**")
 
 # 🎯 Interface Streamlit
 st.title("📈 Visualisation des écarts IMU (Posture)")
