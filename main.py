@@ -154,7 +154,7 @@ class MainWindow(QMainWindow):
             widgets.label_posture.setText("❌ Mauvaise posture détectée")
         else:
             widgets.label_posture.setText("✅ Posture correcte")
-        QTimer.singleShot(500, update_posture_ui)
+       
     update_posture_ui()    
     #Calcul de la vitesse et de la position à un point
     def integrate_acceleration(self,acceleration_values, time_interval):

@@ -7,6 +7,9 @@ from datetime import datetime
 import tkinter as tk
 from tkinter import messagebox
 import matplotlib.pyplot as plt
+import numpy as np
+from PIL import Image, ImageTk
+import winsound
 
 # UUIDs des caractéristiques
 SENSOR_CHARACTERISTIC_UUID = "19B10001-E8F2-537E-4F6C-D104768A1214"
@@ -18,9 +21,13 @@ DEVICE_MAC = {
 # Variables globales
 stop_requested = False
 monitor_angle = False
-latest_pitch = {"Haut": None, "Bas": None}
-calibrated_pitch = {"Haut": None, "Bas": None}
-ANGLE_THRESHOLD = 20
+latest_acc = {"Haut": None, "Bas": None}
+calibrated_angle = None
+previous_posture_state = None
+
+# Seuils selon recommandations médicales
+GOOD_POSTURE_THRESHOLD = 15
+WARNING_THRESHOLD = 20
 
 # Base de données
 date_hour_DBTable = datetime.now().strftime("TER_%Y%m%d_%H%M")
@@ -87,9 +94,7 @@ async def read_characteristics(address, name):
 
             time_val = timer - timer_offset
             insert_sensor_data(conn, time_val, name, *acc_data, *gyro_data, *orientation_data, steps_data)
-            latest_pitch[name] = orientation_data[1]
-
-            print(f"{name} - Pitch: {orientation_data[1]:.2f}")
+            latest_acc[name] = np.array(acc_data) / np.linalg.norm(acc_data)
             await asyncio.sleep(0.05)
 
     except Exception as e:
@@ -109,127 +114,126 @@ def start_measurement():
     stop_requested = False
     threading.Thread(target=run).start()
 
-def calibrate_orientation():
-    if latest_pitch["Haut"] is not None and latest_pitch["Bas"] is not None:
-        calibrated_pitch["Haut"] = latest_pitch["Haut"]
-        calibrated_pitch["Bas"] = latest_pitch["Bas"]
-        status_label.config(text="✅ Calibration faite. Bonne posture enregistrée.")
-        global monitor_angle
-        monitor_angle = True
-    else:
-        messagebox.showwarning("Calibration", "Pitch non disponible. Assurez-vous que les capteurs envoient des données.")
-
 def stop_measurement():
     global stop_requested, monitor_angle
     stop_requested = True
     monitor_angle = False
     status_label.config(text="⏹️ Mesure arrêtée.")
 
+def calibrate_angle():
+    global calibrated_angle
+    acc_haut = latest_acc.get("Haut")
+    acc_bas = latest_acc.get("Bas")
+    if acc_haut is not None and acc_bas is not None:
+        dot = np.dot(acc_haut, acc_bas)
+        calibrated_angle = np.degrees(np.arccos(np.clip(dot, -1.0, 1.0)))
+        messagebox.showinfo("Calibration", f"✅ Calibration faite : angle de référence = {calibrated_angle:.1f}°")
+        global monitor_angle
+        monitor_angle = True
+    else:
+        messagebox.showwarning("Calibration", "Capteurs non disponibles pour calibration.")
+
+fig, ax = None, None
+plt.ion()
+def init_posture_plot():
+    global fig, ax
+    fig, ax = plt.subplots(figsize=(4, 6))  # fenetre plus grande
+    plt.pause(0.01)
+    ax.set_xlim(-2, 2)
+    ax.set_ylim(-0.5, 3.5)
+    ax.set_aspect('equal')
+    ax.grid(True)
+    ax.set_title("Simulation de posture")
+
+def draw_vector_angle_dual(acc_haut, acc_bas):
+    ax.clear()
+    x0, y0 = 0, 0
+    l = 1.0
+
+    rad_bas = np.arctan2(acc_bas[0], acc_bas[2]) - np.radians(90)
+    x1 = x0 + l * np.sin(rad_bas)
+    y1 = y0 + l * np.cos(rad_bas)
+
+    rad_haut = np.arctan2(acc_haut[0], acc_haut[2]) - np.radians(90)
+    x2 = x1 + l * np.sin(rad_haut)
+    y2 = y1 + l * np.cos(rad_haut)
+
+    ax.plot([x0, x1], [y0, y1], 'bo-', label='Bas')
+    ax.plot([x1, x2], [y1, y2], 'ro-', label='Haut')
+    ax.set_xlim(-2, 2)
+    ax.set_ylim(-0.5, 3.5)
+    ax.set_aspect('equal')
+    ax.grid(True)
+    ax.legend()
+    plt.draw()
+    plt.pause(0.001)
+
 def update_ui():
+    global previous_posture_state
     if monitor_angle:
-        haut = latest_pitch.get("Haut")
-        bas = latest_pitch.get("Bas")
-        pitch_calib_haut = calibrated_pitch.get("Haut")
-        pitch_calib_bas = calibrated_pitch.get("Bas")
-
-        if None not in (haut, bas, pitch_calib_haut, pitch_calib_bas):
-            ecart_haut = abs(haut - pitch_calib_haut)
-            ecart_bas = abs(bas - pitch_calib_bas)
-
-            if ecart_haut > ANGLE_THRESHOLD or ecart_bas > ANGLE_THRESHOLD:
-                status_label.config(
-                    text=f"❌ Mauvaise posture\nΔ Haut: {ecart_haut:.1f}°, Δ Bas: {ecart_bas:.1f}°"
-                )
+        acc_haut = latest_acc.get("Haut")
+        acc_bas = latest_acc.get("Bas")
+        if acc_haut is not None and acc_bas is not None:
+            dot = np.dot(acc_haut, acc_bas)
+            angle = np.degrees(np.arccos(np.clip(dot, -1.0, 1.0)))
+            draw_vector_angle_dual(acc_haut, acc_bas)
+            if calibrated_angle is not None:
+                delta = angle - calibrated_angle
+                angle_label.config(text=f"Angle actuel : {angle:.1f}° | ∆ depuis calibration : {delta:+.1f}°")
+                if abs(delta) <= GOOD_POSTURE_THRESHOLD:
+                    status_label.config(text="✅ Bonne posture", fg="green")
+                    previous_posture_state = "good"
+                elif abs(delta) <= WARNING_THRESHOLD:
+                    status_label.config(text="⚠️ Posture à corriger", fg="orange")
+                    if previous_posture_state != "warn":
+                        winsound.Beep(800, 300)
+                        previous_posture_state = "warn"
+                else:
+                    status_label.config(text="❌ Mauvaise posture", fg="red")
+                    if previous_posture_state != "bad":
+                        winsound.Beep(500, 500)
+                        previous_posture_state = "bad"
             else:
-                status_label.config(
-                    text=f"✅ Bonne posture\nΔ Haut: {ecart_haut:.1f}°, Δ Bas: {ecart_bas:.1f}°"
-                )
+                angle_label.config(text=f"Angle entre capteurs : {angle:.1f}°")
     root.after(500, update_ui)
-
-# 📈 Fonction d'affichage de l’historique du pitch
-def show_pitch_history():
-    # Connexion à la base
-    conn = sqlite3.connect(db_name)
-    cursor = conn.cursor()
-
-    # Récupère toutes les tables TER_...
-    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'TER_%'")
-    tables = [row[0] for row in cursor.fetchall()]
-    conn.close()
-
-    if not tables:
-        messagebox.showinfo("Info", "Aucune session enregistrée.")
-        return
-
-    # Fenêtre de sélection
-    def plot_selected_table():
-        selected_table = table_var.get()
-        plot_pitch_from_table(selected_table)
-        selector.destroy()
-
-    selector = tk.Toplevel(root)
-    selector.title("Choisir une session à afficher")
-
-    tk.Label(selector, text="📁 Sélectionnez une session :").pack(pady=5)
-    table_var = tk.StringVar(selector)
-    table_var.set(tables[0])
-    tk.OptionMenu(selector, table_var, *tables).pack(pady=5)
-    tk.Button(selector, text="Afficher le graphique", command=plot_selected_table).pack(pady=10)
-def plot_pitch_from_table(table_name):
-    try:
-        conn = sqlite3.connect(db_name)
-        cursor = conn.cursor()
-        cursor.execute(f'''
-            SELECT time, pitch, imu_name FROM {table_name}
-            ORDER BY time ASC
-        ''')
-        rows = cursor.fetchall()
-        conn.close()
-    except Exception as e:
-        messagebox.showerror("Erreur", f"Lecture impossible : {e}")
-        return
-
-    time_haut, pitch_haut = [], []
-    time_bas, pitch_bas = [], []
-
-    for time, pitch, name in rows:
-        if name == "Haut":
-            time_haut.append(time)
-            pitch_haut.append(pitch)
-        elif name == "Bas":
-            time_bas.append(time)
-            pitch_bas.append(pitch)
-
-    if not time_haut and not time_bas:
-        messagebox.showinfo("Info", "Pas de données exploitables.")
-        return
-
-    plt.figure(figsize=(12, 6))
-    if time_haut:
-        plt.plot(time_haut, pitch_haut, label="Capteur Haut", linewidth=1.5)
-    if time_bas:
-        plt.plot(time_bas, pitch_bas, label="Capteur Bas", linewidth=1.5)
-
-    plt.title(f"Pitch dans le temps - {table_name}")
-    plt.xlabel("Temps (ms)")
-    plt.ylabel("Pitch (°)")
-    plt.grid(True)
-    plt.legend()
-    plt.tight_layout()
-    plt.show()
-
 
 # Interface utilisateur
 root = tk.Tk()
-root.title("Interface IMU - Contrôle de posture")
+root.title("Inflat3D - Contrôle de posture (UPSSITECH)")
+root.geometry("700x650")  # Fenêtre plus grande
 
-tk.Button(root, text="▶️ Start", width=25, command=start_measurement).pack(pady=5)
-tk.Button(root, text="🎯 Calibrer (Bonne posture)", width=25, command=calibrate_orientation).pack(pady=5)
-tk.Button(root, text="⏹️ Stop", width=25, command=stop_measurement).pack(pady=5)
-tk.Button(root, text="📈 Afficher l'historique", width=25, command=show_pitch_history).pack(pady=5)
+# Titre projet
+tk.Label(root, text="🎓 Projet Inflat3D ", font=("Arial", 16, "bold")).pack(pady=5)
 
-status_label = tk.Label(root, text="🕐 En attente de démarrage...", font=("Arial", 12))
-status_label.pack(pady=15)
+# Logo
+try:
+    pil_image = Image.open("logo_upssitech.png")
+    resized_image = pil_image.resize((342, 100))  
+    logo = ImageTk.PhotoImage(resized_image)
 
+    logo_label = tk.Label(root, image=logo)
+    logo_label.image = logo  
+    logo_label.pack(pady=5)
+except Exception as e:
+    print(f"Erreur chargement logo: {e}")
+
+button_frame = tk.Frame(root)
+button_frame.pack(pady=10)
+
+tk.Button(button_frame, text="▶️ Start", width=25, command=start_measurement).grid(row=0, column=0, padx=5, pady=5)
+tk.Button(button_frame, text="🎯 Calibrer angle", width=25, command=calibrate_angle).grid(row=1, column=0, padx=5, pady=5)
+tk.Button(button_frame, text="⏹️ Stop", width=25, command=stop_measurement).grid(row=2, column=0, padx=5, pady=5)
+
+angle_frame = tk.Frame(root)
+angle_frame.pack(pady=10)
+
+angle_label = tk.Label(angle_frame, text="Angle entre capteurs : -- °", font=("Arial", 14))
+angle_label.pack(pady=5)
+
+status_label = tk.Label(root, text="🕐 En attente de démarrage...", font=("Arial", 14, "bold"))
+status_label.pack(pady=10)
+
+monitor_angle = True
+init_posture_plot()
 update_ui()
 root.mainloop()
